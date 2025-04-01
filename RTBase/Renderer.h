@@ -47,10 +47,10 @@ public:
 	};
 
 	int blockSize = 32;
-	int numBlocksX = 0;         // 横向分块数
-	int numBlocksY = 0;         // 纵向分块数
+	int numBlocksX = 0;         
+	int numBlocksY = 0;    
 	std::vector<BlockStats> blocks;
-	int totalSamples = 256;     // 总样本预算
+	int totalSamples = 256;
 
 	void init(Scene* _scene, GamesEngineeringBase::Window* _canvas)
 	{
@@ -159,7 +159,7 @@ public:
 		VPLTracePath(nextRay, pathThroughput, sampler, depth + 1);
 	}
 
-	Colour ncomputeDirect(ShadingData shadingData, Sampler* sampler)
+	Colour ocomputeDirect(ShadingData shadingData, Sampler* sampler)
 	{
 		Colour direct;
 		Colour result;
@@ -359,7 +359,6 @@ public:
 	void computeVarianceAndAllocate() {
 		float totalVariance = 0.0f;
 
-		// 计算每个块的方差
 		for (auto& block : blocks) {
 			int numPixels = (block.x1 - block.x0) * (block.y1 - block.y0);
 			if (numPixels == 0) continue;
@@ -370,19 +369,91 @@ public:
 			totalVariance += block.variance;
 		}
 
-		// 分配样本
 		const int remainingSamples = totalSamples - film->SPP;
 		for (auto& block : blocks) {
 			float weight = totalVariance > 0 ? block.variance / totalVariance : 1.0f / blocks.size();
 			block.allocatedSamples = max(1, (int)std::round(weight * remainingSamples));
 		}
 	}
+	void orender()
+	{
+		//traceVPLs(&samplers[0], 32);
+		static const int TILE_SIZE = 32;
+		film->incrementSPP();
+
+		int numThreads = numProcs;
+		std::vector<std::thread> workers;
+		workers.reserve(numThreads);
+
+		int numTilesX = (film->width + TILE_SIZE - 1) / TILE_SIZE;
+		int numTilesY = (film->height + TILE_SIZE - 1) / TILE_SIZE;
+
+		auto renderTile = [&](int tileX, int tileY, int threadId)
+			{
+				int startX = tileX * TILE_SIZE;
+				int startY = tileY * TILE_SIZE;
+				int endX = min(startX + TILE_SIZE, (int)film->width);
+				int endY = min(startY + TILE_SIZE, (int)film->height);
+
+				Sampler* localSampler = &samplers[threadId];
+
+				for (int y = startY; y < endY; y++)
+				{
+					for (int x = startX; x < endX; x++)
+					{
+						float px = x + 0.5f;
+						float py = y + 0.5f;
+						int index = ((y - startY) * TILE_SIZE + (x - startX)) * 3;
+
+						Ray ray = scene->camera.generateRay(px, py);
+
+						Colour pathThroughput(1.0f, 1.0f, 1.0f);
+						Colour col = pathTrace(ray, pathThroughput, 5, localSampler);
+						//Colour col = direct(ray, localSampler);
+						//Colour col = viewNormals(ray);
+						film->splat(px, py, col);
+
+						unsigned char r = (unsigned char)(min(col.r, 1.0f) * 255);
+						unsigned char g = (unsigned char)(min(col.g, 1.0f) * 255);
+						unsigned char b = (unsigned char)(min(col.b, 1.0f) * 255);
+
+						film->tonemap(x, y, r, g, b);
+						canvas->draw(x, y, r, g, b);
+					}
+				}
+			};
+
+		auto workerFunc = [&](int threadId)
+			{
+				for (int tileY = 0; tileY < numTilesY; tileY++)
+				{
+					for (int tileX = 0; tileX < numTilesX; tileX++)
+					{
+						if (((tileY * numTilesX) + tileX) % numThreads == threadId)
+						{
+							renderTile(tileX, tileY, threadId);
+						}
+					}
+				}
+			};
+		for (int i = 0; i < numThreads; i++)
+		{
+			workers.emplace_back(workerFunc, i);
+		}
+		for (auto& w : workers) {
+			w.join();
+		}
+	}
+
 	void render() {
+		//traceVPLs(&samplers[0], 32);
 		const int initialSamples = 4;
 		// 初始化分配
 		for (auto& block : blocks) {
 			block.allocatedSamples = initialSamples;
 		}
+		std::vector<float> hdrpixels(film->width * film->height * 3, 0.0f);
+
 
 		for (int iter = 0; iter < totalSamples / initialSamples; ++iter) {
 			film->incrementSPP();
@@ -391,6 +462,7 @@ public:
 			auto renderBlock = [&](int blockIdx, int threadId) {
 				auto& block = blocks[blockIdx];
 				if (block.allocatedSamples <= 0) return;
+
 
 				Sampler* localSampler = &samplers[threadId];
 
@@ -423,6 +495,7 @@ public:
 							unsigned char r = (unsigned char)(col.r * 255);
 							unsigned char g = (unsigned char)(col.g * 255);
 							unsigned char b = (unsigned char)(col.b * 255);
+
 							film->tonemap(px, py, r, g, b);
 							canvas->draw(x, y, r, g, b);
 
@@ -432,7 +505,6 @@ public:
 				block.allocatedSamples = 0;
 				};
 
-			// 启动多线程渲染
 			std::vector<std::thread> workers;
 			for (int i = 0; i < numProcs; i++) {
 				workers.emplace_back([&, i]() {
@@ -443,6 +515,7 @@ public:
 			}
 			for (auto& w : workers) w.join();
 
+			
 			// 计算方差并分配下一批样本
 			computeVarianceAndAllocate();
 		}
