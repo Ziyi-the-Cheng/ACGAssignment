@@ -37,6 +37,21 @@ public:
 	int numProcs;
 	std::vector<VPL> vpls;
 
+	struct BlockStats {
+		std::vector<Colour> pixelSamples;
+		Colour sum;
+		Colour sumSquares;
+		float variance = 0.0f;
+		int allocatedSamples = 4;
+		int x0, y0, x1, y1;
+	};
+
+	int blockSize = 32;
+	int numBlocksX = 0;         
+	int numBlocksY = 0;    
+	std::vector<BlockStats> blocks;
+	int totalSamples = 256;
+
 	void init(Scene* _scene, GamesEngineeringBase::Window* _canvas)
 	{
 		scene = _scene;
@@ -53,10 +68,33 @@ public:
 		for (int i = 0; i < numProcs; i++) {
 			samplers[i] = MTRandom(i + 1);
 		}
+
+		blockSize = 32;
+		numBlocksX = (scene->camera.width + blockSize - 1) / blockSize;
+		numBlocksY = (scene->camera.height + blockSize - 1) / blockSize;
+		blocks.resize(numBlocksX * numBlocksY);
+
+		for (int by = 0; by < numBlocksY; ++by) {
+			for (int bx = 0; bx < numBlocksX; ++bx) {
+				auto& block = blocks[by * numBlocksX + bx];
+				block.x0 = bx * blockSize;
+				block.y0 = by * blockSize;
+				block.x1 = min(block.x0 + blockSize, scene->camera.width);
+				block.y1 = min(block.y0 + blockSize, scene->camera.height);
+				block.pixelSamples.resize((block.x1 - block.x0) * (block.y1 - block.y0), Colour(0, 0, 0));
+			}
+		}
 	}
 	void clear()
 	{
 		film->clear();
+		for (auto& block : blocks) {
+			block.sum = Colour(0, 0, 0);
+			block.sumSquares = Colour(0, 0, 0);
+			block.variance = 0.0f;
+			block.allocatedSamples = 4;
+			std::fill(block.pixelSamples.begin(), block.pixelSamples.end(), Colour(0, 0, 0));
+		}
 	}
 
 #define MAX_DEPTH 8
@@ -121,7 +159,7 @@ public:
 		VPLTracePath(nextRay, pathThroughput, sampler, depth + 1);
 	}
 
-	Colour ncomputeDirect(ShadingData shadingData, Sampler* sampler)
+	Colour ocomputeDirect(ShadingData shadingData, Sampler* sampler)
 	{
 		Colour direct;
 		Colour result;
@@ -318,7 +356,26 @@ public:
 		return Colour(0.0f, 0.0f, 0.0f);
 	}
 
-	void render()
+	void computeVarianceAndAllocate() {
+		float totalVariance = 0.0f;
+
+		for (auto& block : blocks) {
+			int numPixels = (block.x1 - block.x0) * (block.y1 - block.y0);
+			if (numPixels == 0) continue;
+
+			Colour mean = block.sum / numPixels;
+			Colour meanSquares = block.sumSquares / numPixels;
+			block.variance = (meanSquares - mean * mean).Lum();
+			totalVariance += block.variance;
+		}
+
+		const int remainingSamples = totalSamples - film->SPP;
+		for (auto& block : blocks) {
+			float weight = totalVariance > 0 ? block.variance / totalVariance : 1.0f / blocks.size();
+			block.allocatedSamples = max(1, (int)std::round(weight * remainingSamples));
+		}
+	}
+	void orender()
 	{
 		//traceVPLs(&samplers[0], 32);
 		static const int TILE_SIZE = 32;
@@ -388,6 +445,81 @@ public:
 		}
 	}
 
+	void render() {
+		//traceVPLs(&samplers[0], 32);
+		const int initialSamples = 4;
+		// 初始化分配
+		for (auto& block : blocks) {
+			block.allocatedSamples = initialSamples;
+		}
+		std::vector<float> hdrpixels(film->width * film->height * 3, 0.0f);
+
+
+		for (int iter = 0; iter < totalSamples / initialSamples; ++iter) {
+			film->incrementSPP();
+
+			// 多线程渲染代码（修改为按块索引）
+			auto renderBlock = [&](int blockIdx, int threadId) {
+				auto& block = blocks[blockIdx];
+				if (block.allocatedSamples <= 0) return;
+
+
+				Sampler* localSampler = &samplers[threadId];
+
+				for (int y = block.y0; y < block.y1; y++) {
+					for (int x = block.x0; x < block.x1; x++) {
+						for (int s = 0; s < block.allocatedSamples; s++) {
+
+							float px = std::clamp(
+								x + localSampler->next(),
+								0.0f,
+								static_cast<float>(scene->camera.width - 1)
+							);
+
+							float py = std::clamp(
+								y + localSampler->next(),
+								0.0f,
+								static_cast<float>(scene->camera.height - 1)
+							);
+
+							Ray ray = scene->camera.generateRay(px, py);
+							Colour pathThroughput(1.0f, 1.f, 1.f);
+							Colour col = pathTrace(ray, pathThroughput, 5, localSampler);
+
+							int idx = (y - block.y0) * (block.x1 - block.x0) + (x - block.x0);
+							block.pixelSamples[idx] = block.pixelSamples[idx] + col;
+							block.sum = block.sum + col;
+							block.sumSquares = block.sumSquares + col * col;
+
+							film->splat(px, py, col);
+							unsigned char r = (unsigned char)(col.r * 255);
+							unsigned char g = (unsigned char)(col.g * 255);
+							unsigned char b = (unsigned char)(col.b * 255);
+
+							film->tonemap(px, py, r, g, b);
+							canvas->draw(x, y, r, g, b);
+
+						}
+					}
+				}
+				block.allocatedSamples = 0;
+				};
+
+			std::vector<std::thread> workers;
+			for (int i = 0; i < numProcs; i++) {
+				workers.emplace_back([&, i]() {
+					for (int b = i; b < blocks.size(); b += numProcs) {
+						renderBlock(b, i);
+					}
+					});
+			}
+			for (auto& w : workers) w.join();
+
+			
+			// 计算方差并分配下一批样本
+			computeVarianceAndAllocate();
+		}
+	}
 	void nrender()
 	{
 		static const int TILE_SIZE = 32;
@@ -512,6 +644,7 @@ public:
 				unsigned char r = (unsigned char)(col.r * 255);
 				unsigned char g = (unsigned char)(col.g * 255);
 				unsigned char b = (unsigned char)(col.b * 255);
+				film->tonemap(px, py, r, g, b);
 				canvas->draw(x, y, r, g, b);
 			}
 		}
