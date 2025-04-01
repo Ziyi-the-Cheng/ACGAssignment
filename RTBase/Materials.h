@@ -239,6 +239,7 @@ public:
 	}
 	Vec3 sample(const ShadingData& shadingData, Sampler* sampler, Colour& reflectedColour, float& pdf)
 	{
+
 		/*Vec3 woLocal = shadingData.frame.toLocal(shadingData.wo);
 		Vec3 wi = Vec3(-woLocal.x, -woLocal.y, woLocal.z);
 		float cosTheta = fabsf(woLocal.z); 
@@ -270,7 +271,6 @@ public:
 		
 		reflectedColour = albedo->sample(shadingData.tu, shadingData.tv) * F * MF;
 
-		// 计算正确的 PDF（基于 GGX 重要性采样）
 		float dotHO = std::max(1e-6f, Dot(wo, h)); 
 		float dotNH = std::max(1e-6f, h.z);
 		pdf = (D * dotNH) / (4.0f * dotHO);
@@ -280,10 +280,10 @@ public:
 	Colour evaluate(const ShadingData& shadingData, const Vec3& wi)
 	{
 		//Vec3 wiLocal = shadingData.frame.toLocal(wi);
-		//float cosTheta = fabsf(wiLocal.z); // 计算入射角度
-		//Colour F = ShadingHelper::fresnelConductor(cosTheta, eta, k); // 应用Fresnel效应
+		//float cosTheta = fabsf(wiLocal.z); 
+		//Colour F = ShadingHelper::fresnelConductor(cosTheta, eta, k); 
 		//Colour reflectedColour = albedo->sample(shadingData.tu, shadingData.tv) * F;
-		//return reflectedColour / (4 * cosTheta); // 这里假设是镜面反射并加上余弦项
+		//return reflectedColour / (4 * cosTheta);
 
 		Vec3 woLocal = shadingData.frame.toLocal(shadingData.wo);
 		Vec3 wiLocal = shadingData.frame.toLocal(wi);

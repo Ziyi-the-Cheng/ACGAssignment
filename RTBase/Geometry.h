@@ -295,45 +295,6 @@ struct IntersectionData
 #define TRIANGLE_COST 2.0f
 #define BUILD_BINS 32
 
-//class BVHNode
-//{
-//public:
-//	AABB bounds;
-//	BVHNode* r;
-//	BVHNode* l;
-//	// This can store an offset and number of triangles in a global triangle list for example
-//	// But you can store this however you want!
-//	// unsigned int offset;
-//	// unsigned char num;
-//	BVHNode()
-//	{
-//		r = NULL;
-//		l = NULL;
-//	}
-//	// Note there are several options for how to implement the build method. Update this as required
-//	void build(std::vector<Triangle>& inputTriangles)
-//	{
-//		// Add BVH building code here
-//	}
-//	void traverse(const Ray& ray, const std::vector<Triangle>& triangles, IntersectionData& intersection)
-//	{
-//		// Add BVH Traversal code here
-//	}
-//	IntersectionData traverse(const Ray& ray, const std::vector<Triangle>& triangles)
-//	{
-//		IntersectionData intersection;
-//		intersection.t = FLT_MAX;
-//		traverse(ray, triangles, intersection);
-//		return intersection;
-//	}
-//	bool traverseVisible(const Ray& ray, const std::vector<Triangle>& triangles, const float maxT)
-//	{
-//		// Add visibility code here
-//		return true;
-//	}
-//};
-
-
 class BVHNode
 {
 public:

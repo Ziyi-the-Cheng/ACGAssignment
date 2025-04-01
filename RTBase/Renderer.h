@@ -15,10 +15,19 @@
 #include <OpenImageDenoise/oidn.hpp>
 #include <algorithm>
 
+//#define IR
+//#define DN
+
+//There are three versions, switch by changing the above defines.
+//Defult version of this project applies adaptive sample. 
+//Enable the #define IR will apply instant radiosity, enable the 
+//#define DN will apply Open Image Denoiser.
+
+
 class VPL {
 public:
 	ShadingData shadingData;
-	Colour Ls; // VPL的辐射亮度
+	Colour Ls;
 	Vec3 position() const { return shadingData.x; }
 	void init(ShadingData _shadingData, Colour c) {
 		shadingData = _shadingData;
@@ -103,63 +112,62 @@ public:
 		vpls.clear();
 
 		for (int i = 0; i < N_VPLs; ++i) {
-			// 1. 采样光源
+			// 1. sample light
 			float lightPmf;
 			Light* light = scene->sampleLight(sampler, lightPmf);
 			if (!light || lightPmf <= 1e-6f) continue;
 
-			// 2. 采样光源位置和方向
+			// 2. sample position and normal
 			float pdfPosition, pdfDirection;
 			Vec3 lightPos = light->samplePositionFromLight(sampler, pdfPosition);
 			Vec3 lightDir = light->sampleDirectionFromLight(sampler, pdfDirection);
 
-			// 3. 初始化路径吞吐量
+			// 3. initialize
 			Colour Le = light->evaluate(ShadingData(), -lightDir);
 			Colour throughput = Le * std::abs(Dot(lightDir, light->normal(ShadingData(), lightDir)))
 				/ (lightPmf * pdfPosition * pdfDirection);
 
-			// 4. 开始路径追踪（直接调用VPLTracePath）
+			// 4. start tracing
 			Ray ray(lightPos + lightDir * EPSILON, lightDir);
 			VPLTracePath(ray, throughput, sampler, 0);
 		}
 	}
 
 	void VPLTracePath(Ray& r, Colour pathThroughput, Sampler* sampler, int depth) {
-		if (depth >= 5) return; // 限制最大深度
+		if (depth >= 5) return; 
 
 		IntersectionData isect = scene->traverse(r);
 		if (isect.t >= FLT_MAX) return;
 
 		ShadingData sd = scene->calculateShadingData(isect, r);
 
-		// 只在非镜面表面生成VPL
+		// generate VPL
 		if (!sd.bsdf->isPureSpecular()) {
 			VPL newVPL;
 			newVPL.shadingData = sd;
-			newVPL.Ls = pathThroughput; // 路径吞吐量直接作为辐射亮度
+			newVPL.Ls = pathThroughput;
 			vpls.push_back(newVPL);
 		}
 
-		// 俄罗斯轮盘终止
 		float rrProb = min(pathThroughput.Lum(), 0.95f);
 		if (sampler->next() > rrProb) return;
 		pathThroughput = pathThroughput / rrProb;
 
-		// 采样BSDF方向
+		// Sample bsdf and wi
 		Colour bsdfVal;
 		float pdf;
 		Vec3 wi = sd.bsdf->sample(sd, sampler, bsdfVal, pdf);
 		if (pdf < 1e-6f) return;
 
-		// 更新路径吞吐量
 		pathThroughput = pathThroughput * bsdfVal * std::abs(Dot(wi, sd.sNormal)) / pdf;
 
-		// 继续追踪
+		// recursion
 		Ray nextRay(sd.x + wi * EPSILON, wi);
 		VPLTracePath(nextRay, pathThroughput, sampler, depth + 1);
 	}
 
-	Colour ocomputeDirect(ShadingData shadingData, Sampler* sampler)
+#ifdef IR
+	Colour computeDirect(ShadingData shadingData, Sampler* sampler)
 	{
 		Colour direct;
 		Colour result;
@@ -210,15 +218,13 @@ public:
 			Vec3 x_i = vpl.position();
 			Vec3 wi = (x_i - shadingData.x).normalize();
 
-			// 几何项计算
+			// GTerm
 			float dist2 = (x_i - shadingData.x).lengthSq();
 			float cosTheta = std::abs(Dot(wi, shadingData.sNormal));
 			float cosThetaVPL = std::abs(Dot(-wi, vpl.shadingData.sNormal));
 			float G = cosTheta * cosThetaVPL / dist2;
 			if (G < 1e-6f) continue;
-			// 可见性测试
 			if (scene->visible(shadingData.x, x_i)) {
-				// 双向BSDF评估
 				Colour frCamera = shadingData.bsdf->evaluate(shadingData, wi);
 				Colour frVPL = vpl.shadingData.bsdf->evaluate(vpl.shadingData, -wi);
 				result = result + frCamera * frVPL * G * vpl.Ls;
@@ -226,6 +232,9 @@ public:
 		}
 		return  direct + result;
 	}
+
+	
+#else
 
 	Colour computeDirect(ShadingData shadingData, Sampler* sampler)
 	{
@@ -274,6 +283,9 @@ public:
 		}
 		return Colour(0.0f, 0.0f, 0.0f);
 	}
+
+#endif
+
 	Colour pathTrace(Ray& r, Colour& pathThroughput, int depth, Sampler* sampler, bool canHitLight = true)
 	{
 		IntersectionData intersection = scene->traverse(r);
@@ -375,9 +387,11 @@ public:
 			block.allocatedSamples = max(1, (int)std::round(weight * remainingSamples));
 		}
 	}
-	void orender()
+
+#ifdef IR
+	void render()
 	{
-		//traceVPLs(&samplers[0], 32);
+		traceVPLs(&samplers[0], 32);
 		static const int TILE_SIZE = 32;
 		film->incrementSPP();
 
@@ -444,83 +458,8 @@ public:
 			w.join();
 		}
 	}
-
-	void render() {
-		//traceVPLs(&samplers[0], 32);
-		const int initialSamples = 4;
-		// 初始化分配
-		for (auto& block : blocks) {
-			block.allocatedSamples = initialSamples;
-		}
-		std::vector<float> hdrpixels(film->width * film->height * 3, 0.0f);
-
-
-		for (int iter = 0; iter < totalSamples / initialSamples; ++iter) {
-			film->incrementSPP();
-
-			// 多线程渲染代码（修改为按块索引）
-			auto renderBlock = [&](int blockIdx, int threadId) {
-				auto& block = blocks[blockIdx];
-				if (block.allocatedSamples <= 0) return;
-
-
-				Sampler* localSampler = &samplers[threadId];
-
-				for (int y = block.y0; y < block.y1; y++) {
-					for (int x = block.x0; x < block.x1; x++) {
-						for (int s = 0; s < block.allocatedSamples; s++) {
-
-							float px = std::clamp(
-								x + localSampler->next(),
-								0.0f,
-								static_cast<float>(scene->camera.width - 1)
-							);
-
-							float py = std::clamp(
-								y + localSampler->next(),
-								0.0f,
-								static_cast<float>(scene->camera.height - 1)
-							);
-
-							Ray ray = scene->camera.generateRay(px, py);
-							Colour pathThroughput(1.0f, 1.f, 1.f);
-							Colour col = pathTrace(ray, pathThroughput, 5, localSampler);
-
-							int idx = (y - block.y0) * (block.x1 - block.x0) + (x - block.x0);
-							block.pixelSamples[idx] = block.pixelSamples[idx] + col;
-							block.sum = block.sum + col;
-							block.sumSquares = block.sumSquares + col * col;
-
-							film->splat(px, py, col);
-							unsigned char r = (unsigned char)(col.r * 255);
-							unsigned char g = (unsigned char)(col.g * 255);
-							unsigned char b = (unsigned char)(col.b * 255);
-
-							film->tonemap(px, py, r, g, b);
-							canvas->draw(x, y, r, g, b);
-
-						}
-					}
-				}
-				block.allocatedSamples = 0;
-				};
-
-			std::vector<std::thread> workers;
-			for (int i = 0; i < numProcs; i++) {
-				workers.emplace_back([&, i]() {
-					for (int b = i; b < blocks.size(); b += numProcs) {
-						renderBlock(b, i);
-					}
-					});
-			}
-			for (auto& w : workers) w.join();
-
-			
-			// 计算方差并分配下一批样本
-			computeVarianceAndAllocate();
-		}
-	}
-	void nrender()
+#elif defined(DN)
+	void render()
 	{
 		static const int TILE_SIZE = 32;
 		film->incrementSPP();
@@ -624,31 +563,84 @@ public:
 			}
 		}
 	}
-
-	void trender()
-	{
-		film->incrementSPP();
-		for (unsigned int y = 0; y < film->height; y++)
-		{
-			for (unsigned int x = 0; x < film->width; x++)
-			{
-				float px = x + 0.5f;
-				float py = y + 0.5f;
-				Ray ray = scene->camera.generateRay(px, py);
-				Sampler* localSampler = &samplers[0];
-				Colour pathThroughput(1.0f, 1.0f, 1.0f);
-				Colour col = pathTrace(ray, pathThroughput, 5, localSampler);
-				//Colour col = viewNormals(ray);
-				//Colour col = albedo(ray);
-				film->splat(px, py, col);
-				unsigned char r = (unsigned char)(col.r * 255);
-				unsigned char g = (unsigned char)(col.g * 255);
-				unsigned char b = (unsigned char)(col.b * 255);
-				film->tonemap(px, py, r, g, b);
-				canvas->draw(x, y, r, g, b);
-			}
-		}
+#else
+void render() {
+	const int initialSamples = 4;
+	// initialize blocks
+	for (auto& block : blocks) {
+		block.allocatedSamples = initialSamples;
 	}
+	std::vector<float> hdrpixels(film->width * film->height * 3, 0.0f);
+
+
+	for (int iter = 0; iter < totalSamples / initialSamples; ++iter) {
+		film->incrementSPP();
+
+		auto renderBlock = [&](int blockIdx, int threadId) {
+			auto& block = blocks[blockIdx];
+			if (block.allocatedSamples <= 0) return;
+
+
+			Sampler* localSampler = &samplers[threadId];
+
+			for (int y = block.y0; y < block.y1; y++) {
+				for (int x = block.x0; x < block.x1; x++) {
+					for (int s = 0; s < block.allocatedSamples; s++) {
+
+						float px = std::clamp(
+							x + localSampler->next(),
+							0.0f,
+							static_cast<float>(scene->camera.width - 1)
+						);
+
+						float py = std::clamp(
+							y + localSampler->next(),
+							0.0f,
+							static_cast<float>(scene->camera.height - 1)
+						);
+
+						Ray ray = scene->camera.generateRay(px, py);
+						Colour pathThroughput(1.0f, 1.f, 1.f);
+						Colour col = pathTrace(ray, pathThroughput, 5, localSampler);
+
+						int idx = (y - block.y0) * (block.x1 - block.x0) + (x - block.x0);
+						block.pixelSamples[idx] = block.pixelSamples[idx] + col;
+						block.sum = block.sum + col;
+						block.sumSquares = block.sumSquares + col * col;
+
+						film->splat(px, py, col);
+						unsigned char r = (unsigned char)(col.r * 255);
+						unsigned char g = (unsigned char)(col.g * 255);
+						unsigned char b = (unsigned char)(col.b * 255);
+
+						film->tonemap(px, py, r, g, b);
+						canvas->draw(x, y, r, g, b);
+
+					}
+				}
+			}
+			block.allocatedSamples = 0;
+			};
+
+		std::vector<std::thread> workers;
+		for (int i = 0; i < numProcs; i++) {
+			workers.emplace_back([&, i]() {
+				for (int b = i; b < blocks.size(); b += numProcs) {
+					renderBlock(b, i);
+				}
+				});
+		}
+		for (auto& w : workers) w.join();
+
+
+		// calculate variance and update
+		computeVarianceAndAllocate();
+	}
+	}
+#endif
+
+
+
 	int getSPP()
 	{
 		return film->SPP;
